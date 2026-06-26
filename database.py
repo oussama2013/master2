@@ -1,363 +1,410 @@
-import sqlite3
-import os
+# database.py - إصدار Firebase
+import streamlit as st
 from datetime import datetime
+from firebase_config import db, auth
+import uuid
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "memoires.db")
-
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-def init_db():
-    conn = get_conn()
-    c = conn.cursor()
-
-    c.executescript("""
-    CREATE TABLE IF NOT EXISTS specializations (
-        id   INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL UNIQUE
-    );
-
-    CREATE TABLE IF NOT EXISTS titles (
-        id                INTEGER PRIMARY KEY AUTOINCREMENT,
-        name              TEXT NOT NULL,
-        specialization_id INTEGER NOT NULL REFERENCES specializations(id) ON DELETE CASCADE,
-        is_taken          INTEGER NOT NULL DEFAULT 0,
-        is_suggested      INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS supervisors (
-        id            INTEGER PRIMARY KEY AUTOINCREMENT,
-        name          TEXT NOT NULL UNIQUE,
-        max_students  INTEGER NOT NULL DEFAULT 3,
-        current_count INTEGER NOT NULL DEFAULT 0,
-        is_suggested  INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS registrations (
-        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-        student1_first     TEXT NOT NULL,
-        student1_last      TEXT NOT NULL,
-        student1_email     TEXT NOT NULL UNIQUE,
-        student2_first     TEXT,
-        student2_last      TEXT,
-        student2_email     TEXT UNIQUE,
-        is_solo            INTEGER NOT NULL DEFAULT 0,
-        specialization_id  INTEGER REFERENCES specializations(id),
-        title_id           INTEGER REFERENCES titles(id),
-        custom_title       TEXT,
-        supervisor_id      INTEGER REFERENCES supervisors(id),
-        custom_supervisor  TEXT,
-        notes              TEXT,
-        change_request     TEXT,
-        created_at         TEXT NOT NULL,
-        updated_at         TEXT NOT NULL
-    );
-    """)
-    conn.commit()
-    conn.close()
-
-# ── Specializations ────────────────────────────────────────────────────────────
-
+# ============================================================
+# دوال التخصصات (Specializations)
+# ============================================================
 def get_specializations():
-    conn = get_conn()
-    rows = conn.execute("SELECT * FROM specializations ORDER BY name").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """جلب جميع التخصصات"""
+    try:
+        specs = db.child("specializations").get()
+        if specs.each():
+            return [{"id": spec.key(), "name": spec.val().get("name", "")} 
+                    for spec in specs.each()]
+        # بيانات افتراضية إذا كانت فارغة
+        defaults = ["علم الحاسوب", "الرياضيات", "الفيزياء", "الكيمياء"]
+        for name in defaults:
+            db.child("specializations").push({"name": name})
+        return [{"id": "default", "name": name} for name in defaults]
+    except Exception as e:
+        st.error(f"خطأ في جلب التخصصات: {str(e)}")
+        return []
 
 def add_specialization(name):
-    conn = get_conn()
+    """إضافة تخصص جديد"""
     try:
-        conn.execute("INSERT INTO specializations (name) VALUES (?)", (name.strip(),))
-        conn.commit()
-        return True, "تمت الإضافة بنجاح"
-    except sqlite3.IntegrityError:
-        return False, "التخصص موجود بالفعل"
-    finally:
-        conn.close()
+        if not name.strip():
+            return False, "يرجى إدخال اسم التخصص"
+        # التحقق من وجوده مسبقاً
+        specs = db.child("specializations").order_by_child("name").equal_to(name.strip()).get()
+        if specs.each():
+            return False, "هذا التخصص موجود بالفعل"
+        db.child("specializations").push({"name": name.strip()})
+        return True, "تم إضافة التخصص بنجاح"
+    except Exception as e:
+        return False, f"خطأ: {str(e)}"
 
 def delete_specialization(spec_id):
-    conn = get_conn()
-    conn.execute("DELETE FROM specializations WHERE id=?", (spec_id,))
-    conn.commit()
-    conn.close()
+    """حذف تخصص"""
+    try:
+        db.child("specializations").child(spec_id).remove()
+        return True
+    except:
+        return False
 
-# ── Titles ─────────────────────────────────────────────────────────────────────
-
-def get_titles(spec_id, available_only=True):
-    conn = get_conn()
-    q = "SELECT * FROM titles WHERE specialization_id=?"
-    params = [spec_id]
-    if available_only:
-        q += " AND is_taken=0"
-    q += " ORDER BY name"
-    rows = conn.execute(q, params).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+# ============================================================
+# دوال العناوين (Titles)
+# ============================================================
+def get_titles(spec_id=None, available_only=True):
+    """جلب العناوين حسب التخصص"""
+    try:
+        titles = db.child("titles").get()
+        result = []
+        if titles.each():
+            for t in titles.each():
+                data = t.val()
+                if spec_id and data.get("specialization_id") != spec_id:
+                    continue
+                if available_only and data.get("is_taken", False):
+                    continue
+                result.append({
+                    "id": t.key(),
+                    "name": data.get("name", ""),
+                    "specialization_id": data.get("specialization_id", ""),
+                    "is_taken": data.get("is_taken", False),
+                    "is_suggested": data.get("is_suggested", False)
+                })
+        return result
+    except Exception as e:
+        st.error(f"خطأ في جلب العناوين: {str(e)}")
+        return []
 
 def get_all_titles():
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT t.*, s.name as spec_name
-        FROM titles t JOIN specializations s ON t.specialization_id = s.id
-        ORDER BY s.name, t.name
-    """).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """جلب جميع العناوين"""
+    return get_titles(available_only=False)
 
-def add_title(name, spec_id):
-    conn = get_conn()
-    conn.execute("INSERT INTO titles (name, specialization_id) VALUES (?,?)", (name.strip(), spec_id))
-    conn.commit()
-    conn.close()
+def add_title(name, spec_id, is_suggested=False):
+    """إضافة عنوان جديد"""
+    try:
+        if not name.strip():
+            return False, "يرجى إدخال العنوان"
+        db.child("titles").push({
+            "name": name.strip(),
+            "specialization_id": spec_id,
+            "is_taken": False,
+            "is_suggested": is_suggested
+        })
+        return True, "تم إضافة العنوان بنجاح"
+    except Exception as e:
+        return False, f"خطأ: {str(e)}"
 
 def delete_title(title_id):
-    conn = get_conn()
-    taken = conn.execute("SELECT is_taken FROM titles WHERE id=?", (title_id,)).fetchone()
-    if taken and taken["is_taken"]:
-        conn.close()
-        return False, "لا يمكن حذف عنوان محجوز"
-    conn.execute("DELETE FROM titles WHERE id=?", (title_id,))
-    conn.commit()
-    conn.close()
-    return True, "تم الحذف"
+    """حذف عنوان"""
+    try:
+        title = db.child("titles").child(title_id).get()
+        if title.val() and title.val().get("is_taken", False):
+            return False, "لا يمكن حذف عنوان محجوز"
+        db.child("titles").child(title_id).remove()
+        return True, "تم حذف العنوان"
+    except Exception as e:
+        return False, f"خطأ: {str(e)}"
 
 def release_title(title_id):
-    conn = get_conn()
-    conn.execute("UPDATE titles SET is_taken=0 WHERE id=?", (title_id,))
-    conn.commit()
-    conn.close()
+    """تحرير عنوان (جعله غير محجوز)"""
+    try:
+        db.child("titles").child(title_id).update({"is_taken": False})
+        return True
+    except:
+        return False
 
-# ── Supervisors ────────────────────────────────────────────────────────────────
-
+# ============================================================
+# دوال المشرفين (Supervisors)
+# ============================================================
 def get_supervisors(available_only=True):
-    conn = get_conn()
-    if available_only:
-        rows = conn.execute(
-            "SELECT * FROM supervisors WHERE current_count < max_students ORDER BY name"
-        ).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM supervisors ORDER BY name").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """جلب المشرفين"""
+    try:
+        sups = db.child("supervisors").get()
+        result = []
+        if sups.each():
+            for s in sups.each():
+                data = s.val()
+                current = data.get("current_count", 0)
+                max_students = data.get("max_students", 3)
+                if available_only and current >= max_students:
+                    continue
+                result.append({
+                    "id": s.key(),
+                    "name": data.get("name", ""),
+                    "max_students": max_students,
+                    "current_count": current,
+                    "is_suggested": data.get("is_suggested", False)
+                })
+        return result
+    except Exception as e:
+        st.error(f"خطأ في جلب المشرفين: {str(e)}")
+        return []
 
 def add_supervisor(name, max_students=3):
-    conn = get_conn()
+    """إضافة مشرف جديد"""
     try:
-        conn.execute(
-            "INSERT INTO supervisors (name, max_students) VALUES (?,?)",
-            (name.strip(), max_students)
-        )
-        conn.commit()
-        return True, "تمت الإضافة بنجاح"
-    except sqlite3.IntegrityError:
-        return False, "المشرف موجود بالفعل"
-    finally:
-        conn.close()
+        if not name.strip():
+            return False, "يرجى إدخال اسم المشرف"
+        db.child("supervisors").push({
+            "name": name.strip(),
+            "max_students": max_students,
+            "current_count": 0,
+            "is_suggested": False
+        })
+        return True, "تم إضافة المشرف بنجاح"
+    except Exception as e:
+        return False, f"خطأ: {str(e)}"
 
 def update_supervisor_max(sup_id, new_max):
-    conn = get_conn()
-    conn.execute("UPDATE supervisors SET max_students=? WHERE id=?", (new_max, sup_id))
-    conn.commit()
-    conn.close()
+    """تحديث الحد الأقصى للمشرف"""
+    try:
+        db.child("supervisors").child(sup_id).update({"max_students": new_max})
+        return True
+    except:
+        return False
 
 def delete_supervisor(sup_id):
-    conn = get_conn()
-    row = conn.execute("SELECT current_count FROM supervisors WHERE id=?", (sup_id,)).fetchone()
-    if row and row["current_count"] > 0:
-        conn.close()
-        return False, "لا يمكن حذف مشرف لديه طلاب مسجلون"
-    conn.execute("DELETE FROM supervisors WHERE id=?", (sup_id,))
-    conn.commit()
-    conn.close()
-    return True, "تم الحذف"
-
-# ── Registrations ──────────────────────────────────────────────────────────────
-
-def solo_count():
-    conn = get_conn()
-    n = conn.execute("SELECT COUNT(*) FROM registrations WHERE is_solo=1").fetchone()[0]
-    conn.close()
-    return n
-
-def email_exists(email):
-    conn = get_conn()
-    e = email.strip().lower()
-    r = conn.execute(
-        "SELECT id FROM registrations WHERE student1_email=? OR student2_email=?", (e, e)
-    ).fetchone()
-    conn.close()
-    return r is not None
-
-def register_student(data):
-    """data: dict with all form fields. Returns (ok, message)."""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    email1 = data["student1_email"].strip().lower()
-    email2 = data.get("student2_email", "").strip().lower() or None
-
-    # Validate emails uniqueness
-    if email_exists(email1):
-        return False, "البريد الإلكتروني للطالب الأول مسجل مسبقاً"
-    if email2 and email_exists(email2):
-        return False, "البريد الإلكتروني للطالب الثاني مسجل مسبقاً"
-    if email2 and email1 == email2:
-        return False, "لا يمكن أن يكون بريد الطالبين متطابقاً"
-
-    is_solo = data.get("is_solo", False)
-    if is_solo and solo_count() >= 15:
-        return False, "امتلأت مقاعد التسجيل الفردي (15 مقعداً)"
-
-    conn = get_conn()
+    """حذف مشرف"""
     try:
-        # Handle title
-        title_id = data.get("title_id") or None
-        custom_title = data.get("custom_title", "").strip() or None
-
-        if title_id:
-            row = conn.execute("SELECT is_taken FROM titles WHERE id=?", (title_id,)).fetchone()
-            if not row or row["is_taken"]:
-                return False, "هذا العنوان محجوز بالفعل"
-            conn.execute("UPDATE titles SET is_taken=1 WHERE id=?", (title_id,))
-            custom_title = None
-        elif custom_title:
-            conn.execute(
-                "INSERT INTO titles (name, specialization_id, is_taken, is_suggested) VALUES (?,?,1,1)",
-                (custom_title, data["specialization_id"])
-            )
-            title_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            custom_title = None
-        else:
-            return False, "يجب اختيار عنوان أو اقتراح عنوان"
-
-        # Handle supervisor
-        sup_id = data.get("supervisor_id") or None
-        custom_sup = data.get("custom_supervisor", "").strip() or None
-
-        if sup_id:
-            row = conn.execute(
-                "SELECT current_count, max_students FROM supervisors WHERE id=?", (sup_id,)
-            ).fetchone()
-            if not row or row["current_count"] >= row["max_students"]:
-                return False, "هذا المشرف وصل للحد الأقصى"
-            conn.execute("UPDATE supervisors SET current_count=current_count+1 WHERE id=?", (sup_id,))
-            custom_sup = None
-        elif custom_sup:
-            conn.execute(
-                "INSERT INTO supervisors (name, max_students, current_count, is_suggested) VALUES (?,3,1,1)",
-                (custom_sup,)
-            )
-            sup_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            custom_sup = None
-        else:
-            return False, "يجب اختيار مشرف أو اقتراح مشرف"
-
-        conn.execute("""
-            INSERT INTO registrations (
-                student1_first, student1_last, student1_email,
-                student2_first, student2_last, student2_email,
-                is_solo, specialization_id,
-                title_id, custom_title,
-                supervisor_id, custom_supervisor,
-                notes, created_at, updated_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            data["student1_first"].strip(), data["student1_last"].strip(), email1,
-            data.get("student2_first","").strip() or None,
-            data.get("student2_last","").strip() or None,
-            email2,
-            1 if is_solo else 0,
-            data["specialization_id"],
-            title_id, custom_sup,
-            sup_id, None,
-            data.get("notes","").strip() or None,
-            now, now
-        ))
-        conn.commit()
-        return True, "تم التسجيل بنجاح ✅"
+        sup = db.child("supervisors").child(sup_id).get()
+        if sup.val() and sup.val().get("current_count", 0) > 0:
+            return False, "لا يمكن حذف مشرف لديه طلاب"
+        db.child("supervisors").child(sup_id).remove()
+        return True, "تم حذف المشرف"
     except Exception as e:
-        conn.rollback()
         return False, f"خطأ: {str(e)}"
-    finally:
-        conn.close()
+
+# ============================================================
+# دوال التسجيل (Registrations)
+# ============================================================
+def register_student(data):
+    """تسجيل طالب جديد"""
+    try:
+        # التحقق من البريد الإلكتروني
+        email = data.get("student1_email")
+        existing = get_registration_by_email(email)
+        if existing:
+            return False, "هذا البريد الإلكتروني مسجل بالفعل"
+        
+        # معالجة العنوان
+        title_id = data.get("title_id")
+        custom_title = data.get("custom_title", "")
+        
+        if title_id:
+            # حجز العنوان
+            db.child("titles").child(title_id).update({"is_taken": True})
+        elif custom_title:
+            # إضافة عنوان مقترح
+            spec_id = data.get("specialization_id")
+            ok, _ = add_title(custom_title, spec_id, is_suggested=True)
+            if ok:
+                titles = db.child("titles").order_by_child("name").equal_to(custom_title).get()
+                if titles.each():
+                    title_id = titles.each()[0].key()
+                    db.child("titles").child(title_id).update({"is_taken": True})
+        
+        # معالجة المشرف
+        sup_id = data.get("supervisor_id")
+        custom_sup = data.get("custom_supervisor", "")
+        
+        if sup_id:
+            # زيادة عدد طلاب المشرف
+            sup = db.child("supervisors").child(sup_id).get()
+            current = sup.val().get("current_count", 0) if sup.val() else 0
+            db.child("supervisors").child(sup_id).update({"current_count": current + 1})
+        elif custom_sup:
+            # إضافة مشرف مقترح
+            db.child("supervisors").push({
+                "name": custom_sup,
+                "max_students": 1,
+                "current_count": 1,
+                "is_suggested": True
+            })
+            # جلب ID المشرف الجديد
+            sups = db.child("supervisors").order_by_child("name").equal_to(custom_sup).get()
+            if sups.each():
+                sup_id = sups.each()[0].key()
+        
+        # إنشاء سجل التسجيل
+        registration = {
+            "student1_first": data.get("student1_first", ""),
+            "student1_last": data.get("student1_last", ""),
+            "student1_email": data.get("student1_email", ""),
+            "student2_first": data.get("student2_first", ""),
+            "student2_last": data.get("student2_last", ""),
+            "student2_email": data.get("student2_email", ""),
+            "is_solo": data.get("is_solo", True),
+            "specialization_id": data.get("specialization_id", ""),
+            "title_id": title_id or "",
+            "custom_title": custom_title,
+            "supervisor_id": sup_id or "",
+            "custom_supervisor": custom_sup,
+            "notes": data.get("notes", ""),
+            "change_request": None,
+            "created_at": datetime.now().isoformat(),
+            "status": "active"
+        }
+        
+        db.child("registrations").push(registration)
+        return True, "تم تسجيل الطالب بنجاح"
+        
+    except Exception as e:
+        return False, f"خطأ في التسجيل: {str(e)}"
 
 def get_registration_by_email(email):
-    email = email.strip().lower()
-    conn = get_conn()
-    row = conn.execute("""
-        SELECT r.*,
-               s.name  as spec_name,
-               t.name  as title_name,
-               sv.name as supervisor_name
-        FROM registrations r
-        LEFT JOIN specializations s  ON r.specialization_id = s.id
-        LEFT JOIN titles t           ON r.title_id = t.id
-        LEFT JOIN supervisors sv     ON r.supervisor_id = sv.id
-        WHERE r.student1_email=? OR r.student2_email=?
-    """, (email, email)).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-def submit_change_request(email, request_text):
-    email = email.strip().lower()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = get_conn()
-    c = conn.execute(
-        "UPDATE registrations SET change_request=?, updated_at=? WHERE student1_email=? OR student2_email=?",
-        (request_text.strip(), now, email, email)
-    )
-    conn.commit()
-    affected = c.rowcount
-    conn.close()
-    return affected > 0
+    """البحث عن تسجيل بالبريد الإلكتروني"""
+    try:
+        regs = db.child("registrations").order_by_child("student1_email").equal_to(email).get()
+        if regs.each():
+            data = regs.each()[0].val()
+            data["id"] = regs.each()[0].key()
+            # إضافة معلومات إضافية
+            data["spec_name"] = get_spec_name(data.get("specialization_id", ""))
+            data["title_name"] = get_title_name(data.get("title_id", ""))
+            data["supervisor_name"] = get_supervisor_name(data.get("supervisor_id", ""))
+            return data
+        return None
+    except:
+        return None
 
 def get_all_registrations():
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT r.*,
-               s.name  as spec_name,
-               t.name  as title_name,
-               sv.name as supervisor_name
-        FROM registrations r
-        LEFT JOIN specializations s  ON r.specialization_id = s.id
-        LEFT JOIN titles t           ON r.title_id = t.id
-        LEFT JOIN supervisors sv     ON r.supervisor_id = sv.id
-        ORDER BY r.created_at DESC
-    """).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """جلب جميع التسجيلات"""
+    try:
+        regs = db.child("registrations").get()
+        result = []
+        if regs.each():
+            for r in regs.each():
+                data = r.val()
+                data["id"] = r.key()
+                # إضافة معلومات إضافية
+                data["spec_name"] = get_spec_name(data.get("specialization_id", ""))
+                data["title_name"] = get_title_name(data.get("title_id", ""))
+                data["supervisor_name"] = get_supervisor_name(data.get("supervisor_id", ""))
+                result.append(data)
+        return result
+    except Exception as e:
+        st.error(f"خطأ في جلب التسجيلات: {str(e)}")
+        return []
 
 def delete_registration(reg_id):
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM registrations WHERE id=?", (reg_id,)).fetchone()
-    if not row:
-        conn.close()
-        return False, "التسجيل غير موجود"
-    row = dict(row)
-    if row["supervisor_id"]:
-        conn.execute(
-            "UPDATE supervisors SET current_count=MAX(0,current_count-1) WHERE id=?",
-            (row["supervisor_id"],)
-        )
-    if row["title_id"]:
-        conn.execute("UPDATE titles SET is_taken=0 WHERE id=?", (row["title_id"],))
-    conn.execute("DELETE FROM registrations WHERE id=?", (reg_id,))
-    conn.commit()
-    conn.close()
-    return True, "تم الحذف"
+    """حذف تسجيل وإعادة إتاحة العنوان والمشرف"""
+    try:
+        reg = db.child("registrations").child(reg_id).get()
+        if not reg.val():
+            return False, "التسجيل غير موجود"
+        
+        data = reg.val()
+        
+        # تحرير العنوان
+        title_id = data.get("title_id")
+        if title_id:
+            db.child("titles").child(title_id).update({"is_taken": False})
+        
+        # تقليل عدد طلاب المشرف
+        sup_id = data.get("supervisor_id")
+        if sup_id:
+            sup = db.child("supervisors").child(sup_id).get()
+            if sup.val():
+                current = sup.val().get("current_count", 0)
+                db.child("supervisors").child(sup_id).update({"current_count": max(0, current - 1)})
+        
+        # حذف التسجيل
+        db.child("registrations").child(reg_id).remove()
+        return True, "تم حذف التسجيل وتحرير العنوان والمشرف"
+    except Exception as e:
+        return False, f"خطأ: {str(e)}"
 
+def submit_change_request(email, request_text):
+    """تقديم طلب تغيير"""
+    try:
+        reg = db.child("registrations").order_by_child("student1_email").equal_to(email).get()
+        if reg.each():
+            reg_id = reg.each()[0].key()
+            db.child("registrations").child(reg_id).update({"change_request": request_text})
+            return True
+        return False
+    except:
+        return False
+
+# ============================================================
+# دوال إحصائيات
+# ============================================================
 def get_stats():
-    conn = get_conn()
-    total      = conn.execute("SELECT COUNT(*) FROM registrations").fetchone()[0]
-    solo       = conn.execute("SELECT COUNT(*) FROM registrations WHERE is_solo=1").fetchone()[0]
-    chg_req    = conn.execute("SELECT COUNT(*) FROM registrations WHERE change_request IS NOT NULL AND change_request!=''").fetchone()[0]
-    sups       = conn.execute("SELECT * FROM supervisors ORDER BY name").fetchall()
-    conn.close()
-    return {
-        "total": total, "solo": solo, "duo": total - solo,
-        "solo_remaining": max(0, 15 - solo),
-        "change_requests": chg_req,
-        "supervisors": [dict(s) for s in sups],
-    }
+    """جلب الإحصائيات"""
+    try:
+        regs = get_all_registrations()
+        total = len(regs)
+        solo = sum(1 for r in regs if r.get("is_solo", False))
+        duo = total - solo
+        
+        # عدد طلبات التغيير
+        changes = sum(1 for r in regs if r.get("change_request"))
+        
+        # حساب المتبقي للفردي (بافتراض حد أقصى 15)
+        solo_remaining = max(0, 15 - solo)
+        
+        return {
+            "total": total,
+            "solo": solo,
+            "duo": duo,
+            "solo_remaining": solo_remaining,
+            "change_requests": changes
+        }
+    except:
+        return {"total": 0, "solo": 0, "duo": 0, "solo_remaining": 15, "change_requests": 0}
+
+def solo_count():
+    """عدد التسجيلات الفردية"""
+    try:
+        regs = db.child("registrations").get()
+        if regs.each():
+            return sum(1 for r in regs.each() if r.val().get("is_solo", False))
+        return 0
+    except:
+        return 0
+
+# ============================================================
+# دوال مساعدة
+# ============================================================
+def get_spec_name(spec_id):
+    """جلب اسم التخصص من ID"""
+    try:
+        spec = db.child("specializations").child(spec_id).get()
+        if spec.val():
+            return spec.val().get("name", "")
+        return ""
+    except:
+        return ""
+
+def get_title_name(title_id):
+    """جلب اسم العنوان من ID"""
+    try:
+        title = db.child("titles").child(title_id).get()
+        if title.val():
+            return title.val().get("name", "")
+        return ""
+    except:
+        return ""
+
+def get_supervisor_name(sup_id):
+    """جلب اسم المشرف من ID"""
+    try:
+        sup = db.child("supervisors").child(sup_id).get()
+        if sup.val():
+            return sup.val().get("name", "")
+        return ""
+    except:
+        return ""
+
+def get_conn():
+    """للتوافق مع الكود القديم - يُرجع None"""
+    return None
+
+def init_db():
+    """تهيئة قاعدة البيانات - لا حاجة مع Firebase"""
+    # إضافة بيانات افتراضية إذا كانت فارغة
+    try:
+        if not db.child("specializations").get().each():
+            defaults = ["علم الحاسوب", "الرياضيات", "الفيزياء", "الكيمياء"]
+            for name in defaults:
+                db.child("specializations").push({"name": name})
+    except:
+        pass
+    return True
