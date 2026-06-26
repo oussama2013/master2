@@ -1,21 +1,16 @@
 # firebase_config.py
-import os
-from dotenv import load_dotenv
-import pyrebase
 import streamlit as st
+import pyrebase
 
-# تحميل المتغيرات من .env (للتشغيل المحلي)
-load_dotenv()
-
-# إعدادات Firebase
+# إعدادات Firebase - كتابة الرابط مباشرة
 firebase_config = {
-    "apiKey": os.getenv("FIREBASE_API_KEY", st.secrets.get("firebase", {}).get("apiKey", "")),
-    "authDomain": os.getenv("FIREBASE_AUTH_DOMAIN", st.secrets.get("firebase", {}).get("authDomain", "")),
-    "projectId": os.getenv("FIREBASE_PROJECT_ID", st.secrets.get("firebase", {}).get("projectId", "")),
-    "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET", st.secrets.get("firebase", {}).get("storageBucket", "")),
-    "messagingSenderId": os.getenv("FIREBASE_MESSAGING_SENDER_ID", st.secrets.get("firebase", {}).get("messagingSenderId", "")),
-    "appId": os.getenv("FIREBASE_APP_ID", st.secrets.get("firebase", {}).get("appId", "")),
-    "databaseURL": os.getenv("FIREBASE_DATABASE_URL", st.secrets.get("firebase", {}).get("databaseURL", ""))
+    "apiKey": "AIzaSyCatHf0NlizimLq-FfAPGq4UYvMCHpCgwE",
+    "authDomain": "master-tems.firebaseapp.com",
+    "projectId": "master-tems",
+    "storageBucket": "master-tems.firebasestorage.app",
+    "messagingSenderId": "825388086153",
+    "appId": "1:825388086153:web:2bfef6d4c99b4f3f82a758",
+    "databaseURL": "https://master-tems-default-rtdb.firebaseio.com/"  # الرابط مكتوب مباشرة
 }
 
 # تهيئة Firebase
